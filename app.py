@@ -9,10 +9,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CMC_API_KEY = os.environ.get("CMC_API_KEY")
 WALLET_ADDRESS = os.environ.get("WALLET_ADDRESS")
 
+ETHERSCAN_API_KEY = os.environ.get("ETHERSCAN")
+BSCSCAN_API_KEY = os.environ.get("BSCSCAN")
+
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook"
-
-STABLES = ["USDT", "USDC"]
 
 # ================= FORMAT =================
 def format_precise(n):
@@ -22,72 +23,94 @@ def format_precise(n):
 def get_market_data():
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
     
-    res1 = requests.get(
+    res = requests.get(
         "https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest",
         headers=headers
     ).json()
     
-    total_mc = res1["data"]["quote"]["USD"]["total_market_cap"]
-    btc_dom = res1["data"]["btc_dominance"]
+    total_mc = res["data"]["quote"]["USD"]["total_market_cap"]
+    btc_dom = res["data"]["btc_dominance"]
     
-    res2 = requests.get(
-        "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
-        headers=headers,
-        params={"symbol": ",".join(STABLES), "convert": "USD"}
-    ).json()["data"]
-    
-    stable_total = sum(res2[s]["quote"]["USD"]["market_cap"] for s in STABLES if s in res2)
-    
-    non_stable = total_mc - stable_total
-    stable_pct = (stable_total / total_mc) * 100
-    non_stable_pct = (non_stable / total_mc) * 100
-    
-    return total_mc, stable_total, non_stable, stable_pct, non_stable_pct, btc_dom
+    return total_mc, btc_dom
 
 # ================= WALLET =================
-def get_wallet_data():
-    if not WALLET_ADDRESS:
-        raise Exception("Missing WALLET_ADDRESS")
+def get_tokens(url, api_key):
+    params = {
+        "module": "account",
+        "action": "tokentx",
+        "address": WALLET_ADDRESS,
+        "apikey": api_key
+    }
     
-    url = f"https://openapi.debank.com/v1/user/token_list?id={WALLET_ADDRESS}&is_all=true"
+    res = requests.get(url, params=params).json()
     
-    res = requests.get(url)
+    tokens = {}
     
-    if res.status_code != 200:
-        raise Exception(f"DeBank API error: {res.status_code}")
+    if "result" not in res:
+        return tokens
     
-    data = res.json()
-    
-    if not isinstance(data, list):
-        raise Exception("Invalid response from DeBank")
-    
-    tokens = []
-    total_value = 0
-    
-    for t in data:
-        price = t.get("price", 0) or 0
-        amount = t.get("amount", 0) or 0
-        symbol = t.get("symbol", "UNK")
+    for tx in res["result"]:
+        symbol = tx.get("tokenSymbol") or "UNK"
         
-        value = price * amount
-        
-        # KHÔNG filter nữa (fix lỗi ví nhỏ)
-        if value <= 0:
+        try:
+            value = int(tx["value"]) / (10 ** int(tx["tokenDecimal"]))
+        except:
             continue
         
-        total_value += value
-        tokens.append({
-            "symbol": symbol,
-            "amount": amount,
-            "value": value
-        })
+        if tx["to"].lower() == WALLET_ADDRESS.lower():
+            tokens[symbol] = tokens.get(symbol, 0) + value
+        elif tx["from"].lower() == WALLET_ADDRESS.lower():
+            tokens[symbol] = tokens.get(symbol, 0) - value
     
-    tokens.sort(key=lambda x: x["value"], reverse=True)
+    return tokens
+
+def get_wallet_data():
+    tokens = {}
+
+    # ETH
+    eth = get_tokens("https://api.etherscan.io/api", ETHERSCAN_API_KEY)
     
-    for t in tokens:
-        t["pct"] = (t["value"] / total_value) * 100 if total_value else 0
+    # BSC
+    bsc = get_tokens("https://api.bscscan.com/api", BSCSCAN_API_KEY)
     
-    return total_value, tokens
+    # merge
+    for d in [eth, bsc]:
+        for k, v in d.items():
+            tokens[k] = tokens.get(k, 0) + v
+    
+    # lọc
+    tokens = {k: v for k, v in tokens.items() if v > 0}
+    
+    if not tokens:
+        return 0, []
+    
+    # ===== GET PRICE =====
+    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
+    
+    res = requests.get(
+        "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
+        headers=headers,
+        params={"symbol": ",".join(tokens.keys()), "convert": "USDT"}
+    ).json().get("data", {})
+    
+    total = 0
+    result = []
+    
+    for sym, amount in tokens.items():
+        if sym in res:
+            price = res[sym]["quote"]["USDT"]["price"]
+            value = amount * price
+            total += value
+            result.append((sym, value))
+    
+    result.sort(key=lambda x: x[1], reverse=True)
+    
+    final = []
+    for sym, value in result:
+        pct = (value / total) * 100 if total else 0
+        final.append((sym, value, pct))
+    
+    return total, final
 
 # ================= TELEGRAM =================
 def send_message(chat_id, text):
@@ -116,58 +139,43 @@ def webhook():
         # ===== MARKET =====
         if text.startswith("/mc"):
             try:
-                total, stable, non_stable, sp, nsp, btc_dom = get_market_data()
+                total, btc_dom = get_market_data()
                 
                 msg = f"""
-📊 *CRYPTO MARKET OVERVIEW*
+📊 *CRYPTO MARKET*
 
-💰 Total Market Cap:
-`{format_precise(total)}`
-
-🟢 Stable (USDT + USDC):
-`{format_precise(stable)}`
-→ {sp:.2f}%
-
-🔴 Non-Stable:
-`{format_precise(non_stable)}`
-→ {nsp:.2f}%
-
-🧠 BTC Dominance:
-{btc_dom:.2f}%
+💰 `{format_precise(total)}`
+🧠 BTC Dom: {btc_dom:.2f}%
 """
                 send_message(chat_id, msg)
             
             except Exception as e:
-                send_message(chat_id, f"❌ Error: {e}")
+                send_message(chat_id, f"❌ {e}")
         
         # ===== WALLET =====
         elif text.startswith("/wallet"):
             try:
                 total, tokens = get_wallet_data()
                 
-                msg = "💼 *YOUR WALLET*\n\n"
-                msg += f"📍 `{WALLET_ADDRESS}`\n\n"
-                
                 if total == 0:
-                    msg += "❌ Ví rỗng hoặc không có token\n"
-                else:
-                    msg += f"💰 Total: `{format_precise(total)} USD`\n\n"
-                    
-                    for t in tokens[:10]:
-                        msg += f"{t['symbol']}: `{format_precise(t['value'])}` ({t['pct']:.2f}%)\n"
+                    send_message(chat_id, "❌ Ví rỗng hoặc đọc fail")
+                    return "ok"
+                
+                msg = f"💼 *WALLET*\n\n💰 `{format_precise(total)} USDT`\n\n"
+                
+                for sym, value, pct in tokens[:10]:
+                    msg += f"{sym}: `{format_precise(value)}` ({pct:.2f}%)\n"
                 
                 send_message(chat_id, msg)
             
             except Exception as e:
-                send_message(chat_id, f"❌ Error: {e}")
+                send_message(chat_id, f"❌ {e}")
     
     return "ok"
 
-# ================= SET WEBHOOK =================
 @app.route("/setwebhook")
 def set_webhook():
-    url = f"{BASE_URL}/setWebhook?url={WEBHOOK_URL}"
-    return requests.get(url).text
+    return requests.get(f"{BASE_URL}/setWebhook?url={WEBHOOK_URL}").text
 
 # ================= RUN =================
 if __name__ == "__main__":
