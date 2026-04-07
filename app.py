@@ -1,11 +1,16 @@
 import requests
-from flask import Flask
 import os
+from flask import Flask, request
 from decimal import Decimal
 
 app = Flask(__name__)
 
-API_KEY = os.environ.get("CMC_API_KEY")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CMC_API_KEY = os.environ.get("CMC_API_KEY")
+
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook"
+
 STABLES = ["USDT", "USDC"]
 
 # ================= FORMAT =================
@@ -14,18 +19,21 @@ def format_precise(n):
 
 # ================= DATA =================
 def get_data():
-    # total market
-    url1 = "https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest"
-    headers = {"X-CMC_PRO_API_KEY": API_KEY}
-    res1 = requests.get(url1, headers=headers).json()
+    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
+    
+    res1 = requests.get(
+        "https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest",
+        headers=headers
+    ).json()
     
     total_mc = res1["data"]["quote"]["USD"]["total_market_cap"]
     btc_dom = res1["data"]["btc_dominance"]
     
-    # stable
-    url2 = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
-    params = {"symbol": ",".join(STABLES), "convert": "USD"}
-    res2 = requests.get(url2, headers=headers, params=params).json()["data"]
+    res2 = requests.get(
+        "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
+        headers=headers,
+        params={"symbol": ",".join(STABLES), "convert": "USD"}
+    ).json()["data"]
     
     stable_total = 0
     for s in STABLES:
@@ -39,92 +47,64 @@ def get_data():
     
     return total_mc, stable_total, non_stable, stable_pct, non_stable_pct, btc_dom
 
-# ================= ROUTE =================
-@app.route("/mc")
-def mc():
-    try:
-        total, stable, non_stable, sp, nsp, btc_dom = get_data()
-        
-        return f"""
-        <html>
-        <head>
-            <title>Crypto Market Dashboard</title>
-            <style>
-                body {{
-                    font-family: Arial;
-                    background: #0f172a;
-                    color: white;
-                    text-align: center;
-                    padding: 40px;
-                }}
-                .box {{
-                    margin: 20px auto;
-                    padding: 20px;
-                    border-radius: 15px;
-                    width: 60%;
-                }}
-                .total {{ background: #1e293b; }}
-                .stable {{ background: #065f46; }}
-                .nonstable {{ background: #7f1d1d; }}
-                .bar {{
-                    height: 30px;
-                    border-radius: 10px;
-                    overflow: hidden;
-                    margin-top: 20px;
-                }}
-                .stable-bar {{
-                    background: #10b981;
-                    height: 100%;
-                    float: left;
-                }}
-                .nonstable-bar {{
-                    background: #ef4444;
-                    height: 100%;
-                    float: left;
-                }}
-            </style>
-        </head>
-        <body>
+# ================= TELEGRAM =================
+def send_message(chat_id, text):
+    requests.post(
+        f"{BASE_URL}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown"
+        }
+    )
 
-            <h1>🚀 Crypto Market Overview</h1>
+# ================= ROUTES =================
 
-            <div class="box total">
-                <h2>Total Market Cap</h2>
-                <h1>${format_precise(total)}</h1>
-            </div>
+@app.route("/")
+def home():
+    return "Bot is running"
 
-            <div class="box stable">
-                <h2>Stablecoins (USDT + USDC)</h2>
-                <h1>{sp:.2f}%</h1>
-                <p>${format_precise(stable)}</p>
-            </div>
-
-            <div class="box nonstable">
-                <h2>Non-Stable Market</h2>
-                <h1>{nsp:.2f}%</h1>
-                <p>${format_precise(non_stable)}</p>
-            </div>
-
-            <div class="box total">
-                <h2>Market Structure</h2>
-                <div class="bar">
-                    <div class="stable-bar" style="width:{sp}%"></div>
-                    <div class="nonstable-bar" style="width:{nsp}%"></div>
-                </div>
-                <p>🟢 Stable | 🔴 Crypto</p>
-            </div>
-
-            <div class="box total">
-                <h2>BTC Dominance</h2>
-                <h1>{btc_dom:.2f}%</h1>
-            </div>
-
-        </body>
-        </html>
-        """
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = request.get_json()
     
-    except Exception as e:
-        return str(e)
+    if "message" in update:
+        chat_id = update["message"]["chat"]["id"]
+        text = update["message"].get("text", "")
+        
+        if text.startswith("/mc"):
+            try:
+                total, stable, non_stable, sp, nsp, btc_dom = get_data()
+                
+                msg = f"""
+📊 *CRYPTO MARKET OVERVIEW*
+
+💰 Total Market Cap:
+`{format_precise(total)}`
+
+🟢 Stable (USDT + USDC):
+`{format_precise(stable)}`
+→ {sp:.2f}%
+
+🔴 Non-Stable:
+`{format_precise(non_stable)}`
+→ {nsp:.2f}%
+
+🧠 BTC Dominance:
+{btc_dom:.2f}%
+"""
+                send_message(chat_id, msg)
+            
+            except Exception as e:
+                send_message(chat_id, f"❌ Error: {e}")
+    
+    return "ok"
+
+# ================= SET WEBHOOK =================
+@app.route("/setwebhook")
+def set_webhook():
+    url = f"{BASE_URL}/setWebhook?url={WEBHOOK_URL}"
+    return requests.get(url).text
 
 # ================= RUN =================
 if __name__ == "__main__":
