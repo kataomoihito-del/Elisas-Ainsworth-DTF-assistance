@@ -18,7 +18,7 @@ STABLES = ["USDT", "USDC"]
 def format_precise(n):
     return format(Decimal(str(n)), ",")
 
-# ================= MARKET DATA =================
+# ================= MARKET =================
 def get_market_data():
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
     
@@ -44,35 +44,46 @@ def get_market_data():
     
     return total_mc, stable_total, non_stable, stable_pct, non_stable_pct, btc_dom
 
-# ================= WALLET (DEBANK) =================
+# ================= WALLET =================
 def get_wallet_data():
     if not WALLET_ADDRESS:
         raise Exception("Missing WALLET_ADDRESS")
     
     url = f"https://openapi.debank.com/v1/user/token_list?id={WALLET_ADDRESS}&is_all=true"
     
-    res = requests.get(url).json()
+    res = requests.get(url)
+    
+    if res.status_code != 200:
+        raise Exception(f"DeBank API error: {res.status_code}")
+    
+    data = res.json()
+    
+    if not isinstance(data, list):
+        raise Exception("Invalid response from DeBank")
     
     tokens = []
     total_value = 0
     
-    for t in res:
-        value = t.get("price", 0) * t.get("amount", 0)
+    for t in data:
+        price = t.get("price", 0) or 0
+        amount = t.get("amount", 0) or 0
+        symbol = t.get("symbol", "UNK")
         
-        if value <= 1:  # lọc rác <1$
+        value = price * amount
+        
+        # KHÔNG filter nữa (fix lỗi ví nhỏ)
+        if value <= 0:
             continue
         
         total_value += value
         tokens.append({
-            "symbol": t.get("symbol"),
-            "amount": t.get("amount"),
+            "symbol": symbol,
+            "amount": amount,
             "value": value
         })
     
-    # sort
     tokens.sort(key=lambda x: x["value"], reverse=True)
     
-    # tính %
     for t in tokens:
         t["pct"] = (t["value"] / total_value) * 100 if total_value else 0
     
@@ -134,16 +145,16 @@ def webhook():
             try:
                 total, tokens = get_wallet_data()
                 
-                if total == 0:
-                    send_message(chat_id, "❌ Ví rỗng")
-                    return "ok"
-                
                 msg = "💼 *YOUR WALLET*\n\n"
                 msg += f"📍 `{WALLET_ADDRESS}`\n\n"
-                msg += f"💰 Total: `{format_precise(total)} USD`\n\n"
                 
-                for t in tokens[:10]:
-                    msg += f"{t['symbol']}: `{format_precise(t['value'])}` ({t['pct']:.2f}%)\n"
+                if total == 0:
+                    msg += "❌ Ví rỗng hoặc không có token\n"
+                else:
+                    msg += f"💰 Total: `{format_precise(total)} USD`\n\n"
+                    
+                    for t in tokens[:10]:
+                        msg += f"{t['symbol']}: `{format_precise(t['value'])}` ({t['pct']:.2f}%)\n"
                 
                 send_message(chat_id, msg)
             
