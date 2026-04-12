@@ -59,9 +59,9 @@ def webhook():
                 total, btc_dom = get_market_data()
                 
                 msg = f"""
-📊 *CRYPTO MARKET*
+📊 *CRYPTO MARKET CAP*
 
-💰 `{format_precise(total)}`
+💰 `TOTAL MARKET CAP: {format_precise(total)}`
 🧠 BTC Dom: {btc_dom:.2f}%
 """
                 send_message(chat_id, msg)
